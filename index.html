@@ -1,0 +1,279 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Interactive Data Cube</title>
+    <style>
+        body { 
+            margin: 0; 
+            display: flex; 
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; 
+            height: 100vh; 
+            overflow: hidden; 
+        }
+        #scene-container { 
+            flex: 2; 
+            position: relative; 
+            background: #ffffff;
+        }
+        #sidebar { 
+            flex: 1; 
+            background: #f8f9fa; 
+            padding: 20px; 
+            box-sizing: border-box; 
+            display: flex; 
+            flex-direction: column; 
+            border-left: 1px solid #ddd; 
+            box-shadow: -2px 0 5px rgba(0,0,0,0.05);
+        }
+        h2 { margin-top: 0; color: #333; }
+        button { 
+            padding: 12px 15px; 
+            font-size: 15px; 
+            font-weight: bold;
+            cursor: pointer; 
+            background: #2563eb; 
+            color: white; 
+            border: none; 
+            border-radius: 6px; 
+            margin-bottom: 20px;
+            transition: background 0.2s;
+        }
+        button:hover { background: #1d4ed8; }
+        #info { 
+            margin-bottom: 20px; 
+            font-size: 14px; 
+            color: #555; 
+            line-height: 1.5;
+        }
+        canvas { display: block; }
+        #chart-wrapper {
+            flex-grow: 1;
+            position: relative;
+        }
+    </style>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+
+<div id="scene-container"></div>
+<div id="sidebar">
+    <h2>Data Cube Explorer</h2>
+    <p id="info">
+        <strong>Instructions:</strong><br>
+        1. Click and drag the 3D model to rotate.<br>
+        2. Scroll to zoom in/out.<br>
+        3. <strong>Click any cell</strong> on the top grid to "drill down" through time and view the 1D time series.
+    </p>
+    <button id="toggleView">Switch to Exploded View</button>
+    <div id="chart-wrapper">
+        <canvas id="timeChart"></canvas>
+    </div>
+</div>
+
+<script>
+    // 1. Setup Three.js Scene
+    const container = document.getElementById('scene-container');
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color('#f0f2f5');
+
+    const camera = new THREE.PerspectiveCamera(45, container.clientWidth / container.clientHeight, 0.1, 100);
+    camera.position.set(12, 10, 12);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(container.clientWidth, container.clientHeight);
+    container.appendChild(renderer.domElement);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.7);
+    scene.add(ambientLight);
+    const dirLight = new THREE.DirectionalLight(0xffffff, 0.5);
+    dirLight.position.set(10, 20, 10);
+    scene.add(dirLight);
+
+    // 2. Data and Cube Generation
+    const gridSize = 5;
+    const timeSteps = 4;
+    let isExploded = false;
+    const compactSpacing = 1.0;
+    const explodedSpacing = 3.0;
+
+    const cubes = [];
+    // Generate simulated temperature data (between 10C and 30C)
+    const dataValues = Array.from({length: timeSteps}, () => 
+        Array.from({length: gridSize}, () => 
+            Array.from({length: gridSize}, () => Math.floor(Math.random() * 20) + 10)
+        )
+    );
+
+    function getColor(val) {
+        // Color mapping from Blue (cold) to Red (hot)
+        const t = (val - 10) / 20; 
+        const r = Math.floor(255 * t);
+        const b = Math.floor(255 * (1 - t));
+        return `rgb(${r}, 50, ${b})`;
+    }
+
+    const layerGroups = [];
+    const targetPositions = []; // For animation
+
+    for (let t = 0; t < timeSteps; t++) {
+        const group = new THREE.Group();
+        layerGroups.push(group);
+        targetPositions.push(t * compactSpacing);
+        scene.add(group);
+
+        for (let x = 0; x < gridSize; x++) {
+            for (let z = 0; z < gridSize; z++) {
+                const val = dataValues[t][x][z];
+                const geometry = new THREE.BoxGeometry(0.95, 0.95, 0.95);
+                const material = new THREE.MeshLambertMaterial({ 
+                    color: getColor(val), 
+                    transparent: true, 
+                    opacity: 0.85 
+                });
+                const cube = new THREE.Mesh(geometry, material);
+                
+                // Center the grid around origin (0,0,0)
+                cube.position.set(x - Math.floor(gridSize/2), 0, z - Math.floor(gridSize/2)); 
+                cube.userData = { t, x, z, val };
+                
+                // Add subtle wireframe edges
+                const edges = new THREE.EdgesGeometry(geometry);
+                const line = new THREE.LineSegments(edges, new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.4 }));
+                cube.add(line);
+
+                cubes.push(cube);
+                group.add(cube);
+            }
+        }
+        group.position.y = t * compactSpacing;
+    }
+
+    // 3. Interaction (Raycasting)
+    const raycaster = new THREE.Raycaster();
+    const mouse = new THREE.Vector2();
+
+    window.addEventListener('resize', () => {
+        camera.aspect = container.clientWidth / container.clientHeight;
+        camera.updateProjectionMatrix();
+        renderer.setSize(container.clientWidth, container.clientHeight);
+    });
+
+    container.addEventListener('pointerdown', (event) => {
+        const rect = renderer.domElement.getBoundingClientRect();
+        mouse.x = ( (event.clientX - rect.left) / rect.width ) * 2 - 1;
+        mouse.y = - ( (event.clientY - rect.top) / rect.height ) * 2 + 1;
+
+        raycaster.setFromCamera(mouse, camera);
+        const intersects = raycaster.intersectObjects(cubes);
+
+        if (intersects.length > 0) {
+            const selected = intersects[0].object;
+            highlightColumn(selected.userData.x, selected.userData.z);
+            updateChart(selected.userData.x, selected.userData.z);
+        } else {
+            resetHighlight();
+        }
+    });
+
+    function highlightColumn(x, z) {
+        cubes.forEach(cube => {
+            if (cube.userData.x === x && cube.userData.z === z) {
+                cube.material.opacity = 1.0;
+                cube.scale.set(1.05, 1.05, 1.05); // slightly enlarge active column
+            } else {
+                cube.material.opacity = 0.15; // fade out others
+                cube.scale.set(1, 1, 1);
+            }
+        });
+    }
+
+    function resetHighlight() {
+        cubes.forEach(cube => {
+            cube.material.opacity = 0.85;
+            cube.scale.set(1, 1, 1);
+        });
+    }
+
+    // 4. View Toggle Logic
+    document.getElementById('toggleView').addEventListener('click', (e) => {
+        isExploded = !isExploded;
+        e.target.innerText = isExploded ? "Switch to Compact View" : "Switch to Exploded View";
+        
+        // Update target positions for animation loop
+        for (let t = 0; t < timeSteps; t++) {
+            targetPositions[t] = t * (isExploded ? explodedSpacing : compactSpacing);
+        }
+    });
+
+    // 5. Chart.js Setup
+    const ctx = document.getElementById('timeChart').getContext('2d');
+    const chart = new Chart(ctx, {
+        type: 'line',
+        data: {
+            labels: ['Day 1', 'Day 2', 'Day 3', 'Day 4'],
+            datasets: [{
+                label: 'Click a pixel to view data',
+                data: [null, null, null, null],
+                borderColor: '#2563eb',
+                backgroundColor: 'rgba(37, 99, 235, 0.1)',
+                borderWidth: 2,
+                pointBackgroundColor: '#2563eb',
+                pointRadius: 4,
+                fill: true,
+                tension: 0.2
+            }]
+        },
+        options: {
+            responsive: true,
+            maintainAspectRatio: false,
+            scales: {
+                y: { 
+                    beginAtZero: false, 
+                    min: 5, 
+                    max: 35,
+                    title: { display: true, text: 'Temperature (°C)' }
+                },
+                x: {
+                    title: { display: true, text: 'Time Step (Z-Axis)' }
+                }
+            },
+            plugins: {
+                legend: { display: true }
+            }
+        }
+    });
+
+    function updateChart(x, z) {
+        const series = [];
+        for (let t = 0; t < timeSteps; t++) {
+            series.push(dataValues[t][x][z]);
+        }
+        chart.data.datasets[0].data = series;
+        chart.data.datasets[0].label = `Pixel Series at (X: ${x}, Y: ${z})`;
+        chart.update();
+    }
+
+    // 6. Animation Loop
+    function animate() {
+        requestAnimationFrame(animate);
+        
+        // Smoothly interpolate group positions for Explode/Compact view
+        layerGroups.forEach((group, t) => {
+            group.position.y += (targetPositions[t] - group.position.y) * 0.1;
+        });
+
+        controls.update();
+        renderer.render(scene, camera);
+    }
+    animate();
+</script>
+</body>
+</html>
